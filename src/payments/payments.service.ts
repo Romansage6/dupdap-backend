@@ -332,7 +332,10 @@ export class PaymentsService {
     const payment = await this.findOne(merchantId, paymentId);
     if (!payment) throw new NotFoundException('Payment not found');
 
-    if (payment.status !== PaymentStatus.CONFIRMED) {
+    if (
+      payment.status !== PaymentStatus.CONFIRMED &&
+      payment.status !== PaymentStatus.PARTIALLY_REFUNDED
+    ) {
       throw new BadRequestException('Only confirmed payments can be refunded');
     }
 
@@ -342,7 +345,8 @@ export class PaymentsService {
 
     const alreadyRefundedUsd = new Big(payment.refundAmountUsd ?? '0');
     const remainingUsd = new Big(payment.amountUsd).minus(alreadyRefundedUsd);
-    const refundAmount = new Big(dto.amountUsd);
+    const refundAmount =
+      dto.amountUsd !== undefined ? new Big(dto.amountUsd) : remainingUsd;
 
     if (refundAmount.gt(remainingUsd)) {
       throw new BadRequestException(
@@ -362,6 +366,15 @@ export class PaymentsService {
 
     const saved2 = await this.paymentsRepo.save(payment);
     await this.recordEvent(payment.id, PaymentEventType.REFUNDED, previousStatus, payment.status, merchantId, { refundAmountUsd: dto.amountUsd });
+
+    await this.webhooks.dispatch(payment.merchantId, 'payment.refunded', {
+      paymentId: payment.id,
+      reference: payment.reference,
+      refundedAmountUsd: refundAmount.toFixed(6),
+      totalRefundedUsd: newRefundedUsd.toFixed(6),
+      status: payment.status,
+      reason: dto.reason,
+    });
 
     this.analytics.clearCacheForMerchant(payment.merchantId);
 
