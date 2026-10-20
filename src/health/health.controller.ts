@@ -1,4 +1,4 @@
-import { Controller, Get, HttpStatus, HttpException, UseGuards } from '@nestjs/common';
+import { Controller, Get, HttpStatus, HttpException, Optional, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import {
   HealthCheck,
@@ -14,6 +14,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { MerchantRole } from '../merchants/entities/merchant.entity';
+import { CacheWarmupService } from '../cache/cache-warmup.service';
 
 @ApiTags('health')
 @Controller('health')
@@ -25,6 +26,7 @@ export class HealthController {
     private config: ConfigService,
     private cache: CacheService,
     @InjectQueue('webhook-delivery') private webhookQueue: Queue,
+    @Optional() private readonly cacheWarmup?: CacheWarmupService,
   ) {}
 
   @Get()
@@ -66,6 +68,12 @@ export class HealthController {
         },
         HttpStatus.SERVICE_UNAVAILABLE,
       );
+    }
+    if (this.cacheWarmup && !this.cacheWarmup.isWarmed()) {
+      throw new HttpException({ status: 'warming' }, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    return { status: 'ready' };
+  }
     }
     return { status: 'ready' };
   }
