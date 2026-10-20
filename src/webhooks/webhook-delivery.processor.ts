@@ -24,6 +24,8 @@ interface WebhookDeliveryJobData {
   event: string;
   body: string;
   attemptNumber: number;
+  /** Set by bulk replay (#552); surfaced as the X-Webhook-Replay header. */
+  replay?: boolean;
 }
 
 @Injectable()
@@ -50,11 +52,14 @@ export class WebhookDeliveryProcessor {
     const data = job.data;
     const requestBody = data.body;
     const signature = this.sign(requestBody, data.secret);
-    const headers = {
+    const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "x-webhook-signature": signature,
       "x-webhook-event": data.event,
     };
+    if (data.replay) {
+      headers["X-Webhook-Replay"] = "true";
+    }
 
     try {
       const response = await axios.post(data.url, requestBody, {
@@ -74,16 +79,33 @@ export class WebhookDeliveryProcessor {
       const retryIndex = attemptNumber - 1;
       const nextDelay = retrySchedule[retryIndex] ?? 0;
 
+      // Honour the merchant's payment retry policy (#551). Falls back to the
+      // global webhook schedule when the merchant has no custom policy.
+      let merchant: Merchant | null = null;
+      try {
+        merchant = await this.merchantRepo.findOne({ where: { id: data.merchantId } });
+      } catch {
+        merchant = null;
+      }
+      const maxAttempts =
+        merchant && merchant.paymentRetryMaxAttempts > 0
+          ? merchant.paymentRetryMaxAttempts
+          : retrySchedule.length;
+      const retryDelay =
+        merchant && merchant.paymentRetryDelayMs > 0
+          ? Number(merchant.paymentRetryDelayMs)
+          : nextDelay;
+
       await this.logDelivery(
         data,
         "failure",
         responseCode,
         errorMessage,
-        nextDelay,
+        retryDelay,
       );
       await this.markWebhookFailure(data.webhookId, errorMessage);
 
-      if (retryIndex + 1 < retrySchedule.length) {
+      if (attemptNumber < maxAttempts) {
         const retryPayload = { ...data, attemptNumber: attemptNumber + 1 };
         const retryHash = crypto.createHash('sha256').update(`${data.webhookId}:${data.event}:${retryPayload.attemptNumber}:${data.body}`).digest('hex').slice(0, 32);
 
@@ -92,7 +114,7 @@ export class WebhookDeliveryProcessor {
           retryPayload,
           {
             jobId: `${data.webhookId}:${data.event}:${retryPayload.attemptNumber}:${retryHash}`,
-            delay: nextDelay,
+            delay: retryDelay,
             removeOnComplete: true,
             removeOnFail: false,
           },
