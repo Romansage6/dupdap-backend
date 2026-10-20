@@ -18,6 +18,7 @@ import { PaginatedResponseDto } from '../common/dto/pagination.dto';
 import { PaymentEscrowService, PaymentExpiredError } from '../blockchain-wallet/payment-escrow.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { TransactionLimitsService } from './transaction-limits.service';
+import { GeoipService } from '../geoip/geoip.service';
 
 // Events emitted per payment in a batch — mirrors contract PaymentCreated events
 export interface PaymentCreatedEvent {
@@ -47,6 +48,8 @@ export class PaymentsService {
     private dataSource: DataSource,
     @Optional()
     private txLimits?: TransactionLimitsService,
+    @Optional()
+    private geoip?: GeoipService,
   ) {}
 
   /**
@@ -113,6 +116,9 @@ export class PaymentsService {
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + (dto.expiryMinutes ?? 30));
 
+    const countryCode = this.geoip?.lookupCountry(dto.customerIp) ?? null;
+    const geoFlagged = this.geoip?.isBlockedCountry(countryCode) ?? false;
+
     // Bake expiry into the QR payload so the frontend can render a visual
     // countdown/expiry indicator without an extra clock source (#545).
     const stellarUri = `web+stellar:pay?destination=${depositAddress}&amount=${amountXlm.toFixed(7)}&memo=${memo}&memo_type=text&expires=${encodeURIComponent(expiresAt.toISOString())}`;
@@ -126,6 +132,9 @@ export class PaymentsService {
       amountXlm: amountXlm.toFixed(7),
       description: dto.description,
       customerEmail: dto.customerEmail,
+      customerIp: dto.customerIp,
+      countryCode,
+      geoFlagged,
       metadata: dto.metadata,
       stellarDepositAddress: depositAddress,
       stellarMemo: memo,
@@ -150,6 +159,9 @@ export class PaymentsService {
     saved.expiryLedger = contractPayment.expiryLedger;
     const final = await this.paymentsRepo.save(saved);
     await this.recordEvent(final.id, PaymentEventType.CREATED, null, PaymentStatus.PENDING, merchantId);
+    if (geoFlagged) {
+      this.logger.warn(`Payment ${final.id} flagged: customer country ${countryCode} is in BLOCKED_COUNTRIES`);
+    }
     return final;
   }
 
